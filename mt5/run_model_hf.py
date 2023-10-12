@@ -1,4 +1,5 @@
 import pathlib
+import os
 
 # from data import load_data_file, prepare_dataset, write_predictions
 import datasets
@@ -26,7 +27,7 @@ def _reassemble(sent):
 
 def get_collator(tokenizer, max_length: int, use_translations=True):
     prompt1 = "Genrate interlinear gloss from {src_lang}: "
-    prompt2 = ", with its {transl_lang} translation: "
+    prompt2 = ", with its translation: "
 
     def collate_fn(batch):
         nonlocal tokenizer, prompt1, prompt2, max_length
@@ -37,7 +38,7 @@ def get_collator(tokenizer, max_length: int, use_translations=True):
         if "translation" in batch and use_translations:
             for i, ex in enumerate(batch["translation"]):
                 inputs[i] = (
-                    inputs[i] + prompt2.format(transl_lang="English") + _reassemble(ex)
+                    inputs[i] + prompt2 + _reassemble(ex)
                 )
         inputs = [t + "\nAnswer: " for t in inputs]
 
@@ -65,6 +66,7 @@ def create_trainer(
     batch_size,
     lr,
     max_epochs,
+    ckpt_dir="training-checkpoints",
 ):
     print("Creating trainer...")
     metric = evaluate.load("chrf")
@@ -109,9 +111,9 @@ def create_trainer(
     )
     lr_scheduler = transformers.optimization.AdafactorSchedule(optimizer)
 
-    args = transformers.TrainingArguments(
-        output_dir="training-checkpoints",
-        # evaluation_strategy="epoch",
+    args = transformers.Seq2SeqTrainingArguments(
+        output_dir=ckpt_dir,
+        evaluation_strategy="epoch",
         learning_rate=lr,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=1,
@@ -123,11 +125,13 @@ def create_trainer(
         num_train_epochs=max_epochs,
         # load_best_model_at_end=True,
         report_to="wandb",
-        logging_steps=100,
+        logging_steps=50,
         tf32=True,
+        fp16_full_eval=True,
+        predict_with_generate=True,
     )
 
-    trainer = transformers.Trainer(
+    trainer = transformers.Seq2SeqTrainer(
         model,
         args,
         optimizers=[optimizer, lr_scheduler],
@@ -135,30 +139,15 @@ def create_trainer(
             tokenizer, model=model, label_pad_token_id=-100
         ),
         train_dataset=dataset["train"] if dataset else None,
-        eval_dataset=None,
+        eval_dataset=dataset["validation"] if dataset else None,
         compute_metrics=compute_metrics,
     )
     return trainer
 
 
-def gather_odin_data(odin_root):
-    print("Getting odin language names from glottolog")
-    from pyglottolog import Glottolog
-
-    glottolog = Glottolog("./glottolog")
-    languages = dict()
-    oroot = pathlib.Path(odin_root)
-    for file in tqdm(oroot.glob("*.txt")):
-        langcode = file.stem
-        lang = glottolog.languoid(langcode.split("-")[0])
-        if lang is not None:
-            languages[langcode] = lang.name
-    return languages
-
-
 def main(
     mode: str,
-    odin_root: str,
+    dataset: str,
     model_path: str,
 ):
     if mode == "train":
@@ -166,18 +155,22 @@ def main(
 
     MODEL_INPUT_LENGTH = 1024
 
-    pretrained_model = "google/byt5-base"
+    pretrained_model = "./byt5_odin"
 
     if mode == "train":
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained_model, use_fast=False
+            "google/byt5-base", use_fast=False
         )
 
-        dataset = datasets.load_dataset(odin_root, "all")
+        dataset = datasets.load_dataset(dataset, "all")
         collator = get_collator(tokenizer, max_length=MODEL_INPUT_LENGTH)
-        dataset["train"] = dataset["train"].shuffle()
+        dataset["train"] = dataset["train"].filter(lambda x:x["discard"]==False).shuffle()
         dataset["train"] = dataset["train"].map(
             collator, batched=True, remove_columns=dataset["train"].column_names
+        )
+        dataset["validation"] = dataset["validation"].filter(lambda x:x["discard"]==False).shuffle()
+        dataset["validation"] = dataset["validation"].map(
+            collator, batched=True, remove_columns=dataset["validation"].column_names
         )
 
         # print(f"Using a subset of odin with {dataset['train'].num_rows} rows")
@@ -190,6 +183,7 @@ def main(
             batch_size=2,
             lr=5e-5,
             max_epochs=10,
+            ckpt_dir=os.path.join(model_path, "training-checkpoints"),
         )
 
         print("Training...")
