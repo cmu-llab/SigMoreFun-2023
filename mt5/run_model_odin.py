@@ -25,19 +25,19 @@ def _reassemble(sent):
 
 
 def get_collator(tokenizer, max_length: int, use_translations=True):
-    prompt1 = "Genrate interlinear gloss from {src_lang}: "
-    prompt2 = ", with its {transl_lang} translation: "
+    prompt1 = "Generate interlinear gloss from {src_lang}: "
+    prompt2 = ", with its translation: "
 
     def collate_fn(batch):
         nonlocal tokenizer, prompt1, prompt2, max_length
         inputs = [
-            prompt1.format(src_lang=lang) + _reassemble(ex)
+            prompt1.format(src_lang=lang) + f'"{_reassemble(ex)}"'
             for lang, ex in zip(batch["language"], batch["transcription"])
         ]
         if "translation" in batch and use_translations:
             for i, ex in enumerate(batch["translation"]):
                 inputs[i] = (
-                    inputs[i] + prompt2.format(transl_lang="English") + _reassemble(ex)
+                    inputs[i] + prompt2 + f'"{_reassemble(ex)}"'
                 )
         inputs = [t + "\nAnswer: " for t in inputs]
 
@@ -79,7 +79,7 @@ def create_trainer(
         preds, labels = eval_preds
         if isinstance(preds, tuple):
             preds = preds[0]
-        preds = preds.argmax(-1)
+        # print(preds)
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         # Replace -100 in the labels as we can't decode them.
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
