@@ -1,14 +1,14 @@
-import pathlib
+import csv
 import os
 
-# from data import load_data_file, prepare_dataset, write_predictions
 import datasets
 import evaluate
 import fire
 import numpy as np
 import torch
-from tqdm import tqdm
 import transformers
+from tqdm import tqdm
+
 import wandb
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -37,9 +37,7 @@ def get_collator(tokenizer, max_length: int, use_translations=True):
         ]
         if "translation" in batch and use_translations:
             for i, ex in enumerate(batch["translation"]):
-                inputs[i] = (
-                    inputs[i] + prompt2 + _reassemble(ex)
-                )
+                inputs[i] = inputs[i] + prompt2 + _reassemble(ex)
         inputs = [t + "\nAnswer: " for t in inputs]
 
         if "gloss" in batch:
@@ -149,13 +147,17 @@ def main(
     mode: str,
     dataset: str,
     model_path: str,
+    use_translations: bool = True,
+    preds_file: str = None,
 ):
     if mode == "train":
-        wandb.init(project="lrec-coling-2023", entity="wav2gloss")
+        wandb.init(project="fieldwork", entity="wav2gloss")
 
     MODEL_INPUT_LENGTH = 1024
 
     pretrained_model = "./byt5_odin"
+
+    print(f"Use translations: {use_translations}")
 
     if mode == "train":
         tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -163,12 +165,18 @@ def main(
         )
 
         dataset = datasets.load_dataset(dataset, "all")
-        collator = get_collator(tokenizer, max_length=MODEL_INPUT_LENGTH)
-        dataset["train"] = dataset["train"].filter(lambda x:x["discard"]==False).shuffle()
+        collator = get_collator(
+            tokenizer, max_length=MODEL_INPUT_LENGTH, use_translations=use_translations
+        )
+        dataset["train"] = (
+            dataset["train"].filter(lambda x: x["discard"] == False).shuffle()
+        )
         dataset["train"] = dataset["train"].map(
             collator, batched=True, remove_columns=dataset["train"].column_names
         )
-        dataset["validation"] = dataset["validation"].filter(lambda x:x["discard"]==False).shuffle()
+        dataset["validation"] = (
+            dataset["validation"].filter(lambda x: x["discard"] == False).shuffle()
+        )
         dataset["validation"] = dataset["validation"].map(
             collator, batched=True, remove_columns=dataset["validation"].column_names
         )
@@ -192,49 +200,44 @@ def main(
         trainer.save_model(model_path)
         print(f"Model saved at {model_path}")
     elif mode == "predict":
-        pass
-        # tokenizer = transformers.AutoTokenizer.from_pretrained(
-        #     pretrained_model, use_fast=False
-        # )
-        # if lang == "all":
-        #     langs = list(languages.keys())
-        # else:
-        #     langs = [lang]
-        # for lang in langs:
-        #     data_path = (
-        #         f"../data/{languages[lang]}/{lang}-dev-track{track_num}-uncovered"
-        #     )
-        #     predict_data = load_data_file(data_path)
-        #     predict_dataset = prepare_dataset(data=predict_data)
-        #     collator = get_collator(
-        #         tokenizer=tokenizer,
-        #         src_lang=languages[lang],
-        #         transl_lang=translations[lang],
-        #         max_length=MODEL_INPUT_LENGTH,
-        #     )
-        #     predict_dataset = predict_dataset.map(
-        #         collator, batched=True, remove_columns=predict_dataset.column_names
-        #     )
-        #     model = transformers.AutoModelForPreTraining.from_pretrained(
-        #         model_path).to(device)
-
-        #     preds = []
-        #     for ex in tqdm(predict_dataset["input_ids"]):
-        #         preds.append(
-        #             tokenizer.decode(
-        #                 model.generate(
-        #                     torch.tensor([ex]).to(device),
-        #                     max_length=MODEL_INPUT_LENGTH,
-        #                 )[0],
-        #                 skip_special_tokens=True,
-        #             )
-        #         )
-
-        #     write_predictions(
-        #         data_path,
-        #         lang=lang,
-        #         decoded_preds=preds,
-        #     )
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            "google/byt5-base", use_fast=False
+        )
+        collator = get_collator(
+            tokenizer, max_length=MODEL_INPUT_LENGTH, use_translations=use_translations
+        )
+        print("Loading dataset...")
+        dataset_test = datasets.load_dataset(dataset, "all", split="test")
+        ids = dataset_test["id"]
+        print("Generating predictions...")
+        predict_dataset = dataset_test.map(
+            collator, batched=True, remove_columns=dataset_test.column_names
+        )
+        model = transformers.AutoModelForPreTraining.from_pretrained(model_path).to(
+            device
+        )
+        preds = []
+        for ex in tqdm(predict_dataset["input_ids"]):
+            pred = tokenizer.decode(
+                model.generate(
+                    torch.tensor([ex]).to(device),
+                    max_length=MODEL_INPUT_LENGTH,
+                )[0],
+                skip_special_tokens=True,
+            )
+            preds.append(pred)
+            # print(pred)
+        formatted_preds = []
+        for id, pred in zip(ids, preds):
+            formatted_preds.append({"id": id, "pred": pred})
+        keys = formatted_preds[0].keys()
+        if preds_file is None:
+            preds_file = "preds.csv"
+        print(f"Writing predictions to {preds_file}")
+        with open(preds_file, "w", newline="") as output_file:
+            dict_writer = csv.DictWriter(output_file, keys)
+            dict_writer.writeheader()
+            dict_writer.writerows(formatted_preds)
 
 
 if __name__ == "__main__":
