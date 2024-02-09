@@ -3,6 +3,7 @@
 import json
 from typing import List
 
+import jiwer
 import click
 from data import load_data_file
 from torchtext.data.metrics import bleu_score
@@ -137,11 +138,23 @@ def evaluate_igt(pred: str, gold: str):
     pred_morphemes = [line.gloss_list(segmented=True) for line in pred]
     gold_morphemes = [line.gloss_list(segmented=True) for line in gold]
 
+    MERs = []
+    CERs = []
+    for pred_morph, gold_morph in zip(pred_morphemes, gold_morphemes):
+        pred_morph = " ".join(pred_morph)
+        gold_morph = " ".join(gold_morph)
+        mer = jiwer.wer(gold_morph, pred_morph)
+        cer = jiwer.cer(gold_morph, pred_morph)
+        MERs.append(mer)
+        CERs.append(cer)
+
     all_eval = {
         "word_level": word_eval,
         **eval_morpheme_glosses(
             pred_morphemes=pred_morphemes, gold_morphemes=gold_morphemes
         ),
+        "MER": sum(MERs) / len(MERs),
+        "CER": sum(CERs) / len(CERs),
     }
     print(json.dumps(all_eval, sort_keys=True, indent=4))
 
